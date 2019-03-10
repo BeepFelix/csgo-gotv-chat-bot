@@ -1,0 +1,21 @@
+{
+	"chatRelay": {
+		"accountName": "AccountUsername",
+		"password": "AccountPassword",
+		"telegram": {
+			"steamapikey": "XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+			"telegramToken": "bot123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11",
+			"chat_id": "0100100001100101011011000110110001101111",
+			"maxMessageLength": 1024,
+			"forceSendTime": 15000
+		}
+	},
+	"botsToStart": 500,
+	"botsPerChunk": 100,
+	"timeBetweenChunks": 1000,
+	"message": {
+		"firstTimeDelay": 5000,
+		"text": "Hello World!",
+		"sendTimes": 10
+	}
+}

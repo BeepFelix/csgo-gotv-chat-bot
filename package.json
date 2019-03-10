@@ -1,0 +1,19 @@
+{
+  "name": "csgo-gotv-chat-bot",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "github.com/BeepFelix",
+  "license": "MIT",
+  "dependencies": {
+    "bytebuffer": "^5.0.1",
+    "protobufjs": "github:dcodeIO/protobuf.js#ProtoBuf4",
+    "request": "^2.88.0",
+    "steam-user": "^4.5.0",
+    "steamid": "^1.1.0"
+  }
+}
