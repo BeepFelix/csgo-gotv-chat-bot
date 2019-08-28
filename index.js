@@ -1,325 +1,246 @@
 // Configuration
 const config = require("./config.json");
-const accounts = require("./accounts.json");
+const accounts = require("./accounts.json").splice(0, 10);
+console.log("Got " + accounts.length + " account" + (accounts.length === 1 ? "" : "s"));
 
 // Modules
-const SteamUser = require("steam-user");
-const SteamID = require("steamid");
-const request = require("request");
-const GameCoordinator = require("./helpers/GameCoordinator.js");
+const inquirer = require("inquirer");
 const Account = require("./helpers/Account.js");
+const Helper = require("./helpers/Helper.js");
 
 // Instances
-const steamUser = new SteamUser();
-const csgoUser = new GameCoordinator(steamUser);
-const botsToIgnore = [];
-const bots = [];
-const messages = [];
-const steam_profile_cache = [];
-let forceSendTimeout = setTimeout(sendText, config.chatRelay.telegram.forceSendTime);
-let botsStarted = 0;
+let bots = [];
 
-// Log into Steam
-steamUser.logOn({
-	accountName: config.chatRelay.accountName,
-	password: config.chatRelay.password
-});
+(async () => {
+	console.log("Logging into main account...");
+	let main = new Account(config.main.accountName, config.main.password);
+	await main.login();
 
-steamUser.on("error", console.error);
-steamUser.on("loggedOn", async () => {
-	console.log("Successfully logged into Steam");
-
-	steamUser.setPersona(SteamUser.EPersonaState.Online);
-	steamUser.gamesPlayed([730]);
-});
-
-steamUser.on("appLaunched", async (appid) => {
-	let hello = await csgoUser.start();
-	console.log(hello);
-
-	let mmHello = await csgoUser.sendMessage(
+	let hello = await main.coordinator.sendMessage(
 		730,
-		csgoUser.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_MatchmakingClient2GCHello,
+		main.coordinator.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_MatchmakingClient2GCHello,
 		{},
-		csgoUser.Protos.csgo.CMsgGCCStrike15_v2_MatchmakingClient2GCHello,
+		main.coordinator.Protos.csgo.CMsgGCCStrike15_v2_MatchmakingClient2GCHello,
 		{},
-		csgoUser.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_MatchmakingGC2ClientHello,
-		csgoUser.Protos.csgo.CMsgGCCStrike15_v2_MatchmakingGC2ClientHello,
+		main.coordinator.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_MatchmakingGC2ClientHello,
+		main.coordinator.Protos.csgo.CMsgGCCStrike15_v2_MatchmakingGC2ClientHello,
 		30000
 	);
-	console.log(mmHello);
 
-	let liveGames = await csgoUser.sendMessage(
+	let matches = await main.coordinator.sendMessage(
 		730,
-		csgoUser.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_MatchListRequestCurrentLiveGames,
+		main.coordinator.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_MatchListRequestTournamentGames,
 		{},
-		csgoUser.Protos.csgo.CMsgGCCStrike15_v2_MatchListRequestCurrentLiveGames,
-		{},
-		csgoUser.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_MatchList,
-		csgoUser.Protos.csgo.CMsgGCCStrike15_v2_MatchList,
+		main.coordinator.Protos.csgo.CMsgGCCStrike15_v2_MatchListRequestTournamentGames,
+		{
+			eventid: hello.global_stats.active_tournament_eventid
+		},
+		main.coordinator.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_MatchList,
+		main.coordinator.Protos.csgo.CMsgGCCStrike15_v2_MatchList,
 		30000
 	);
-	console.log(liveGames);
 
-	let tournamentMatches = liveGames.matches.filter(m => m.roundstats_legacy.reservation.tournament_event !== null);
-	console.log(tournamentMatches);
-
-	if (tournamentMatches.length <= 0) {
-		console.log("No Tournament Matches");
-		steamUser.logOff();
+	let liveMatches = matches.matches.filter(m => !m.roundstats_legacy.map && m.watchablematchinfo.server_id && m.watchablematchinfo.match_id);
+	if (liveMatches.length <= 0) {
+		console.log("No major matches are currently live.");
+		main.logOff();
 		return;
 	}
 
-	let match = tournamentMatches[0];
+	let targetMatch = liveMatches[0];
 
-	let joinInfo = await csgoUser.sendMessage(
+	if (liveMatches.length > 1) {
+		let reply_targetMatch = await inquirer.prompt({
+			type: "list",
+			message: "Multiple matches available, which one would you like to target?",
+			name: "match",
+			choices: liveMatches.map((m, i) => {
+				let teams = m.roundstats_legacy.reservation.tournament_teams.map(t => t.team_name).join(" VS ");
+				let map = m.watchablematchinfo.game_map;
+				return {
+					name: teams + " on " + map,
+					value: i
+				}
+			})
+		});
+
+		if (!liveMatches[reply_targetMatch.match]) {
+			console.log("Invalid selection.");
+			main.logOff();
+			return;
+		}
+
+		targetMatch = liveMatches[reply_targetMatch.match];
+	}
+
+	let teams = targetMatch.roundstats_legacy.reservation.tournament_teams.map(t => t.team_name).join(" VS ");
+	let map = targetMatch.watchablematchinfo.game_map;
+	console.log("Targetting match " + teams + " on " + map);
+
+	let joinInfo = await main.coordinator.sendMessage(
 		730,
-		csgoUser.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_ClientRequestWatchInfoFriends2,
+		main.coordinator.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_ClientRequestWatchInfoFriends2,
 		{},
-		csgoUser.Protos.csgo.CMsgGCCStrike15_v2_ClientRequestWatchInfoFriends,
+		main.coordinator.Protos.csgo.CMsgGCCStrike15_v2_ClientRequestWatchInfoFriends,
 		{
-			request_id: 1,
-			serverid: match.watchablematchinfo.server_id.toString(),
-			matchid: match.watchablematchinfo.match_id.toString()
+			request_id: 3,
+			serverid: targetMatch.watchablematchinfo.server_id.toString(),
+			matchid: targetMatch.watchablematchinfo.match_id.toString()
 		},
-		csgoUser.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_WatchInfoUsers,
-		csgoUser.Protos.csgo.CMsgGCCStrike15_v2_WatchInfoUsers,
+		main.coordinator.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_WatchInfoUsers,
+		main.coordinator.Protos.csgo.CMsgGCCStrike15_v2_WatchInfoUsers,
 		30000
 	);
 	console.log(joinInfo);
 
-	let syncPacket = await csgoUser.sendMessage(
-		730,
-		csgoUser.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_GotvSyncPacket,
-		{},
-		csgoUser.Protos.csgo.CMsgGCCStrike15_GotvSyncPacket,
-		{
-			data: {
-				match_id: joinInfo.watchable_match_infos[0].match_id.toString()
-			}
-		},
-		csgoUser.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_GotvSyncPacket,
-		csgoUser.Protos.csgo.CMsgGCCStrike15_GotvSyncPacket,
-		30000
-	);
-	console.log(syncPacket);
+	ensureGOTVChatConnection.call(main, joinInfo.watchable_match_infos[0].match_id.toString());
+	setInterval(ensureGOTVChatConnection.call, (2 * 60 * 1000), main, joinInfo.watchable_match_infos[0].match_id.toString());
 
-	setInterval(async () => {
-		await csgoUser.sendMessage(
-			730,
-			csgoUser.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_GotvSyncPacket,
-			{},
-			csgoUser.Protos.csgo.CMsgGCCStrike15_GotvSyncPacket,
-			{
-				data: {
-					match_id: joinInfo.watchable_match_infos[0].match_id.toString()
-				}
-			},
-			csgoUser.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_GotvSyncPacket,
-			csgoUser.Protos.csgo.CMsgGCCStrike15_GotvSyncPacket,
-			30000
-		);
-	}, (2 * 60 * 1000));
+	await new Promise(p => setTimeout(p, 20 * 1000));
 
-	await csgoUser.sendMessage(
+	await main.coordinator.sendMessage(
 		730,
-		csgoUser.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_GlobalChat_Subscribe,
+		main.coordinator.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_GlobalChat_Subscribe,
 		{},
-		csgoUser.Protos.csgo.CMsgGCCStrike15_v2_ClientToGCChat,
+		main.coordinator.Protos.csgo.CMsgGCCStrike15_v2_ClientToGCChat,
 		{
 			match_id: joinInfo.watchable_match_infos[0].match_id.toString()
-		},
-		undefined,
-		undefined,
-		30000
+		}
 	);
-	console.log("Starting bots...");
 
-	if (accounts.length < config.botsToStart) {
-		console.log("Not enough accounts available. Need " + config.botsToStart + ", have " + accounts.length);
-		return;
-	}
+	console.log("Starting " + accounts.length + " bot" + (accounts.length === 1 ? "" : "s"));
 
-	let accountsToUse = accounts.slice(0, config.botsToStart);
-	let chunks = chunkArray(accountsToUse, config.botsPerChunk);
+	let chunks = Helper.chunkArray(accounts, config.bots.perChunk);
+	for (let i = 0; i < chunks.length; i++) {
+		console.log("Processing chunk " + (i + 1) + "/" + chunks.length);
 
-	for (let chunk of chunks) {
-		await new Promise(async (resolve, reject) => {
-			for (let loginDetails of chunk) {
-				console.log("Logging into " + loginDetails.username);
+		let toAdd = await Promise.all(chunks[i].map((details) => {
+			return new Promise(async (resolve, reject) => {
+				console.log("[LOGIN - " + details.username + "] Logging in...");
 
-				accountHandler(loginDetails.username, loginDetails.password,  match.watchablematchinfo.server_id.toString(), joinInfo.watchable_match_infos[0].match_id.toString(), resolve);
-
-				await new Promise(r => setTimeout(r, 100));
-			}
-		});
-	}
-
-	console.log("All accounts successfully logged into Steam, started CSGO, established GC connection and joined GOTV");
-	console.log("Sending messages in " + Math.round(config.message.firstTimeDelay / 1000) + " second" + (Math.round(config.message.firstTimeDelay / 1000) === 1 ? "" : "s"));
-
-	await new Promise(r => setTimeout(r, config.message.firstTimeDelay));
-
-	for (let bot of bots) {
-		for (let i = 0; i < config.message.sendTimes; i++) {
-			bot.sendMessage(config.message.text);
-		}
-	}
-});
-
-csgoUser.on("message", (msgType, payload) => {
-	if (msgType === csgoUser.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_GlobalChat) {
-		let msg = csgoUser.Protos.csgo.CMsgGCCStrike15_v2_GCToClientChat.decode(payload);
-
-		if (botsToIgnore.includes(msg.account_id)) {
-			console.log("Ignoring our bot: " + msg.account_id);
-			return;
-		}
-
-		console.log(msg);
-
-		let sid = SteamID.fromIndividualAccountID(msg.account_id);
-		let index = steam_profile_cache.map(s => s.steamid).indexOf(sid.toString());
-		let profile = undefined;
-
-		for (let i = steam_profile_cache.length - 1; i >= 0; i--) {
-			if (Date.now() - steam_profile_cache[index].timestamp < 10 * 60 * 1000) {
-				continue;
-			}
-
-			steam_profile_cache.splice(index, 1);
-		}
-
-		if (index <= -1) {
-			profile = await new Promise((resolve, reject) => {
-				request("https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/?key=" + config.chatRelay.telegram.steamapikey + "&steamids=" + sid.toString(), (err, res, body) => {
-					if (err) {
-						reject(err);
-						return;
-					}
-
-					let json = undefined;
-					try {
-						json = JSON.parse(body);
-					} catch (e) { };
-
-					if (json === undefined) {
-						reject(body);
-						return;
-					}
-
-					if (typeof json.response === "undefined") {
-						reject(json);
-						return;
-					}
-
-					resolve(json.response.players[0]);
+				let bot = new Account(details.username, details.password, targetMatch.watchablematchinfo.server_id.toString(), targetMatch.watchablematchinfo.match_id.toString());
+				let success = await bot.login().catch((err) => {
+					console.log("[LOGIN - " + details.username + "] Login failed");
+					console.error(err);
+					resolve(null);
 				});
+				if (!success) {
+					return;
+				}
+
+				console.log("[GOTV - " + details.username + "] Joining GOTV...");
+				let result = await bot.joinGOTV().catch((err) => {
+					console.log("[GOTV - " + details.username + "] Failed joining GOTV");
+					console.error(err);
+					resolve(null);
+				});
+				if (!result) {
+					return;
+				}
+
+				resolve(bot);
 			});
+		}));
+
+		toAdd = toAdd.filter(b => b !== null);
+		bots.push(...toAdd);
+
+		if ((i + 1) < chunks.length) {
+			console.log("Finished chunk " + (i + 1) + "/" + chunks.length + ", waiting " + config.bots.timeBetweenChunks + "ms");
+			await new Promise(p => setTimeout(p, config.bots.timeBetweenChunks));
 		} else {
-			profile = steam_profile_cache[index];
-		}
-
-		if (typeof profile === "undefined") {
-			return;
-		}
-
-		if (steam_profile_cache.map(s => s.steamid).includes(profile.steamid) === false) {
-			steam_profile_cache.push({
-				steamid: profile.steamid,
-				personaname: profile.personaname,
-				timestamp: Date.now()
-			});
-		}
-
-		let chatMsg = "[" + profile.personaname.replace(/\[/g, "").replace(/\]/g, "") + "](https://steamcommunity.com/profiles/" + profile.steamid + "): " + msg.text;
-		messages.push(chatMsg);
-
-		if (messages.join("\n").length >= config.chatRelay.telegram.Length) {
-			sendText();
+			console.log("Finished chunk " + (i + 1) + "/" + chunks.length);
 		}
 	}
-});
 
-async function accountHandler(username, login, serverid, matchid, resolve) {
-	const acc = new Account(username, login, serverid, matchid);
-	let login = await acc.login().catch(console.error);
+	console.log(bots.length + " account" + (bots.length === 1 ? "" : "s") + " have successfully logged on and joined GOTV");
 
-	if (typeof login === "undefined") { // Login failed
-		isFinished(resolve);
+	// Uncomment this if you want logging, but its relatively useless
+	// also I think it just errors at some point
+	// main.coordinator.on("receivedFromGC", processChat.bind(null, main));
+
+	processInput();
+})();
+
+function processChat(main, msgType, payload) {
+	if (msgType !== main.coordinator.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_GlobalChat) {
 		return;
 	}
 
-	let join = await acc.joinGOTV().catch(console.error);
-	if (typeof join === "undefined") {
-		isFinished(resolve);
+	let msg = main.coordinator.Protos.csgo.CMsgGCCStrike15_v2_GCToClientChat.decode(payload);
+	msg = main.coordinator.Protos.csgo.CMsgGCCStrike15_v2_GCToClientChat.toObject(msg);
+
+	let ourAccounts = bots.filter(b => b.client.steamID.accountid);
+	if (ourAccounts.includes(msg.account_id)) {
+		console.log("Ignoring our bot: " + msg.account_id);
 		return;
 	}
 
-	botsToIgnore.push(login.steamid);
-	bots.push(acc);
-
-	isFinished(resolve);
-
-	console.log("Successfully logged into " + username);
+	console.log(msg.account_id + ": " + msg.text);
 }
 
-async function isFinished(resolve) {
-	botsStarted += 1;
-
-	if (botsStarted >= config.botsPerChunk) {
-		botsStarted = 0;
-
-		await new Promise(r => setTimeout(r, config.timeBetweenChunks));
-		resolve();
-	}
-}
-
-function sendText() {
-	clearTimeout(forceSendTimeout);
-	setTimeout(sendText, config.chatRelay.telegram.forceSendTime);
-
-	if (messages.length <= 0) {
-		return;
-	}
-
-	let temp = messages;
-	let toSend = messages.join("\n");
-	messages.length = 0;
-
-	request("https://api.telegram.org/bot" + config.chatRelay.telegram.telegramToken + "/sendMessage?chat_id=" + config.chatRelay.telegram.chat_id + "&text=" + encodeURIComponent(toSend) + "&parse_mode=markdown&disable_web_page_preview=true&disable_notification=true", (err, res, body) => {
-		if (err) {
-			console.error(err);
-			return;
-		}
-
-		let botJson = undefined;
-		try {
-			botJson = JSON.parse(body);
-		} catch (e) { };
-
-		if (botJson === undefined) {
-			console.log(body);
-			return;
-		}
-
-		if (botJson.ok === true) {
-			return;
-		}
-
-		console.log(temp);
-		console.log(botJson);
+function ensureGOTVChatConnection(matchID) {
+	this.coordinator.sendMessage(
+		730,
+		this.coordinator.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_GotvSyncPacket,
+		{},
+		this.coordinator.Protos.csgo.CMsgGCCStrike15_GotvSyncPacket,
+		{
+			data: {
+				instance_id: 0,
+				match_id: matchID
+			}
+		},
+		this.coordinator.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_GotvSyncPacket,
+		this.coordinator.Protos.csgo.CMsgGCCStrike15_GotvSyncPacket,
+		5000
+	).catch((err) => {
+		console.log("GOTV Sync Packet failed for " + matchID);
+		console.error(err);
 	});
 }
 
-// Copied from: https://ourcodeworld.com/articles/read/278/how-to-split-an-array-into-chunks-of-the-same-size-easily-in-javascript
-function chunkArray(myArray, chunk_size) {
-	var tempArray = [];
+async function processInput() {
+	let message = await inquirer.prompt({
+		type: "input",
+		message: "What would you like to send in chat?",
+		name: "message"
+	});
 
-	for (let index = 0; index < myArray.length; index += chunk_size) {
-		myChunk = myArray.slice(index, index + chunk_size);
-		tempArray.push(myChunk);
+	if (!message.message || message.message.trim().length <= 0) {
+		console.log("Invalid message to send");
+		processInput();
+		return;
+	}
+	message.message = message.message.trim();
+
+	let amount = await inquirer.prompt({
+		type: "input",
+		message: "How often would you like each bot to send this message?",
+		name: "amount"
+	});
+
+	if (!amount.amount || amount.amount.trim().length <= 0 || !/^\d+/.test(amount.amount)) {
+		console.log("Invalid amount");
+		processInput();
+		return;
 	}
 
-	return tempArray;
+	amount.amount = BigInt(amount.amount);
+	if (amount.amount > 1000n) {
+		console.log("Cannot send more than 1000 per account");
+		amount.amount = 1000n;
+	}
+	amount.amount = Number(amount.amount);
+
+	console.log("Sending \"" + message.message + "\" " + amount.amount + " times per bot, a total of " + (bots.length * amount.amount) + " amount");
+
+	for (let i = 0; i < amount.amount; i++) {
+		for (let bot of bots) {
+			bot.sendMessage(message.message);
+		}
+		await new Promise(p => setTimeout(p, config.bots.delay));
+	}
+
+	processInput();
 }

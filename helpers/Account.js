@@ -1,5 +1,5 @@
 const SteamUser = require("steam-user");
-const GameCoordinator = require("./GameCoordinator.js");
+const Coordinator = require("./Coordinator.js");
 
 module.exports = class Account {
 	constructor(username, password, serverid, matchid) {
@@ -8,111 +8,131 @@ module.exports = class Account {
 		this.serverid = serverid;
 		this.matchid = matchid;
 
-		this.steamUser = new SteamUser();
-		this.csgoUser = new GameCoordinator(this.steamUser);
+		this.client = new SteamUser();
+		this.coordinator = new Coordinator(this.client);
 	};
 
 	login() {
 		return new Promise((resolve, reject) => {
-			this.steamUser.logOn({
+			let events = {
+				error: (err) => {
+					reject(err);
+				},
+				steamGuard: () => {
+					reject(new Error("Steam Guard required for " + this.username));
+				},
+				loggedOn: async () => {
+					await this.client.requestFreeLicense(730);
+
+					this.client.setPersona(SteamUser.EPersonaState.Online);
+					this.client.gamesPlayed(730);
+
+					// Establish GameCoordinator connection
+					let errGcWelcome = 0;
+					let gcWelcome = undefined;
+					while (true) {
+						gcWelcome = await this.coordinator.sendMessage(
+							730,
+							this.coordinator.Protos.csgo.EGCBaseClientMsg.k_EMsgGCClientHello,
+							{},
+							this.coordinator.Protos.csgo.CMsgClientHello,
+							{},
+							this.coordinator.Protos.csgo.EGCBaseClientMsg.k_EMsgGCClientWelcome,
+							this.coordinator.Protos.csgo.CMsgClientWelcome,
+							2000
+						).catch(() => { });
+
+						if (gcWelcome) {
+							break;
+						}
+
+						errGcWelcome += 1;
+
+						if (errGcWelcome > 10 /* 2 times 10 = 20 seconds to connect */) {
+							reject(new Error("Failed to establish GameCoordinator connection"));
+							this.client.logOff();
+							return;
+						}
+					}
+
+					resolve(true);
+				}
+			}
+
+			let all = () => {
+				for (let ev in events) {
+					this.client.removeListener(ev, events[ev]);
+					this.client.removeListener(ev, all);
+				}
+			}
+
+			for (let ev in events) {
+				this.client.on(ev, events[ev]);
+				this.client.on(ev, all);
+			}
+
+			this.client.logOn({
 				accountName: this.username,
 				password: this.password
 			});
-
-			let error = (err) => {
-				this.steamUser.removeListener("error", error);
-				this.steamUser.removeListener("loggedOn", loggedOn);
-
-				reject(err);
-			}
-
-			let loggedOn = () => {
-				this.steamUser.removeListener("error", error);
-				this.steamUser.removeListener("loggedOn", loggedOn);
-
-				this.steamUser.on("appLaunched", appLaunched);
-
-				this.steamUser.setPersona(SteamUser.EPersonaState.Online);
-				this.steamUser.gamesPlayed([730]);
-			}
-
-			let appLaunched = async (appid) => {
-				if (appid !== 730) {
-					return;
-				}
-
-				this.steamUser.removeListener("appLaunched", appLaunched);
-
-				try {
-					let hello = await this.csgoUser.start();
-
-					let mmHello = await this.csgoUser.sendMessage(
-						730,
-						this.csgoUser.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_MatchmakingClient2GCHello,
-						{},
-						this.csgoUser.Protos.csgo.CMsgGCCStrike15_v2_MatchmakingClient2GCHello,
-						{},
-						this.csgoUser.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_MatchmakingGC2ClientHello,
-						this.csgoUser.Protos.csgo.CMsgGCCStrike15_v2_MatchmakingGC2ClientHello,
-						30000
-					);
-
-					resolve({ steamid: this.steamUser.steamID.accountid, hello: hello, mmHello: mmHello });
-				} catch(err) {
-					this.steamUser.logOff();
-					reject(err);
-				}
-			}
-
-			this.steamUser.on("error", error);
-			this.steamUser.on("loggedOn", loggedOn);
 		});
 	};
 
+	logOff() {
+		this.client.logOff();
+	}
+
 	joinGOTV() {
 		return new Promise(async (resolve, reject) => {
-			// TODO: Add timeout
-
-			let joinInfo = await this.csgoUser.sendMessage(
+			let joinInfo = await this.coordinator.sendMessage(
 				730,
-				this.csgoUser.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_ClientRequestWatchInfoFriends2,
+				this.coordinator.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_ClientRequestWatchInfoFriends2,
 				{},
-				this.csgoUser.Protos.csgo.CMsgGCCStrike15_v2_ClientRequestWatchInfoFriends,
+				this.coordinator.Protos.csgo.CMsgGCCStrike15_v2_ClientRequestWatchInfoFriends,
 				{
-					request_id: 1,
+					request_id: 3,
 					serverid: this.serverid.toString(),
 					matchid: this.matchid.toString()
 				},
-				this.csgoUser.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_WatchInfoUsers,
-				this.csgoUser.Protos.csgo.CMsgGCCStrike15_v2_WatchInfoUsers,
+				this.coordinator.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_WatchInfoUsers,
+				this.coordinator.Protos.csgo.CMsgGCCStrike15_v2_WatchInfoUsers,
 				30000
-			);
+			).catch(reject);
 
-			let syncPacket = await this.csgoUser.sendMessage(
+			if (!joinInfo) {
+				return;
+			}
+
+			let syncPacket = await this.coordinator.sendMessage(
 				730,
-				this.csgoUser.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_GotvSyncPacket,
+				this.coordinator.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_GotvSyncPacket,
 				{},
-				this.csgoUser.Protos.csgo.CMsgGCCStrike15_GotvSyncPacket,
+				this.coordinator.Protos.csgo.CMsgGCCStrike15_GotvSyncPacket,
 				{
 					data: {
+						instance_id: 0,
 						match_id: this.matchid.toString()
 					}
 				},
-				this.csgoUser.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_GotvSyncPacket,
-				this.csgoUser.Protos.csgo.CMsgGCCStrike15_GotvSyncPacket,
+				this.coordinator.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_GotvSyncPacket,
+				this.coordinator.Protos.csgo.CMsgGCCStrike15_GotvSyncPacket,
 				30000
-			);
+			).catch(reject);
 
-			resolve({ joinInfo: joinInfo, syncPacket: syncPacket });		
+			if (!syncPacket) {
+				return;
+			}
+
+			resolve({ joinInfo: joinInfo, syncPacket: syncPacket });
 		});
 	};
 
 	sendMessage(text) {
-		return this.csgoUser.sendMessage(
+		return this.coordinator.sendMessage(
 			730,
-			this.csgoUser.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_GlobalChat,
+			this.coordinator.Protos.csgo.ECsgoGCMsg.k_EMsgGCCStrike15_v2_GlobalChat,
 			{},
-			this.csgoUser.Protos.csgo.CMsgGCCStrike15_v2_ClientToGCChat,
+			this.coordinator.Protos.csgo.CMsgGCCStrike15_v2_ClientToGCChat,
 			{
 				match_id: this.matchid.toString(),
 				text: text

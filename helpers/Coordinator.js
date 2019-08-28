@@ -2,55 +2,32 @@ const Events = require("events");
 const ByteBuffer = require("bytebuffer");
 const Protos = require("./Protos.js");
 
-module.exports = class GameCoordinator extends Events {
-	constructor(steamUser, main_app = 730) {
+module.exports = class Coordinator extends Events {
+	constructor(steamUser) {
 		super();
 
 		this.steamUser = steamUser;
 		this.Protos = Protos([
 			{
 				name: "csgo",
-				protos: [
-					__dirname + "/../protobufs/csgo/gcsystemmsgs.proto",
-					__dirname + "/../protobufs/csgo/gcsdk_gcmessages.proto",
-					__dirname + "/../protobufs/csgo/cstrike15_gcmessages.proto",
-					__dirname + "/../protobufs/csgo/engine_gcmessages.proto"
-				]
+				protos: __dirname + "/../protobufs/csgo"
 			}
 		]);
-		this._GCHelloInterval = null;
-		this.startPromise = null;
 
 		steamUser.on("receivedFromGC", (appid, msgType, payload) => {
-			if (appid === main_app) {
-				if (msgType === this.Protos.csgo.EGCBaseClientMsg.k_EMsgGCClientWelcome) {
-					if (this._GCHelloInterval) {
-						clearInterval(this._GCHelloInterval);
-						this._GCHelloInterval = null;
-					}
-
-					if (this.startPromise !== null) {
-						let msg = this.Protos.csgo.CMsgClientWelcome.decode(payload);
-						this.startPromise(msg);
-						this.startPromise = null;
-					}
-				}
-
-				this.emit("message", msgType, payload);
+			if (appid !== 730) {
+				return;
 			}
 
-			this.emit("allMsg", appid, msgType, payload);
+			this.emit("receivedFromGC", msgType, payload);
 		});
-	}
 
-	start(appid = 730) {
-		return new Promise((resolve, reject) => {
-			this._GCHelloInterval = setInterval(() => {
-				this.steamUser.sendToGC(appid, this.Protos.csgo.EGCBaseClientMsg.k_EMsgGCClientHello, {} , new this.Protos.csgo.CMsgClientHello({}).toBuffer());
-			}, 5000);
+		let _handleMessage = this.steamUser._handleMessage;
+		this.steamUser._handleMessage = (header, body) => {
+			_handleMessage.call(this.steamUser, header, body);
 
-			this.startPromise = resolve;
-		});
+			this.emit("receivedFromSteam", header, body);
+		}
 	}
 
 	/**
@@ -67,16 +44,34 @@ module.exports = class GameCoordinator extends Events {
 	 */
 	sendMessage(appid, header, proto, protobuf, settings, responseHeader, responseProtobuf, timeout = 30000) {
 		return new Promise((resolve, reject) => {
-			if (typeof appid === "undefined") {
+			if (!appid) {
+				let encoded = settings;
+				if (protobuf) {
+					let message = protobuf.create(settings);
+					encoded = protobuf.encode(message);
+				}
+
 				this.steamUser._send({
 					msg: header,
 					proto: proto
-				}, typeof protobuf === "undefined" ? settings : new protobuf(settings).toBuffer());
+				}, protobuf ? encoded.finish() : encoded);
 
-				if (typeof responseHeader === "undefined") {
+				if (!responseHeader) {
 					resolve();
 					return;
 				}
+
+				let sendTimeout = setTimeout(() => {
+					if (this.steamUser._handlerManager._handlers[responseHeader] && this.steamUser._handlerManager._handlers[responseHeader].length > 0) {
+						this.steamUser._handlerManager._handlers[responseHeader].pop(); // We added our message last (I assume) so remove the last one
+
+						if (this.steamUser._handlerManager._handlers[responseHeader].length <= 0) {
+							delete this.steamUser._handlerManager._handlers[responseHeader];
+						}
+					}
+
+					reject(new Error("Failed to send message: Timeout"));
+				}, timeout);
 
 				this.steamUser._handlerManager.add(responseHeader, (body) => {
 					if (this.steamUser._handlerManager.hasHandler(responseHeader)) {
@@ -89,18 +84,21 @@ module.exports = class GameCoordinator extends Events {
 						}
 					}
 
-					if (typeof responseProtobuf === "undefined") {
+					clearTimeout(sendTimeout);
+
+					if (!responseProtobuf) {
 						if (body instanceof Buffer || body instanceof ByteBuffer) {
 							resolve(body);
 							return;
 						}
 
-						resolve(new responseProtobuf(body).toBuffer());
+						resolve(body);
 						return;
 					}
 
 					if (body instanceof Buffer || body instanceof ByteBuffer) {
-						body = responseProtobuf.decode(body);
+						body = responseProtobuf.decode(body.toBuffer());
+						body = responseProtobuf.toObject(body, { defaults: true });
 					}
 
 					resolve(body);
@@ -108,30 +106,36 @@ module.exports = class GameCoordinator extends Events {
 				return;
 			}
 
-			this.steamUser.sendToGC(appid, header, proto, typeof protobuf === "undefined" ? settings : new protobuf(settings).toBuffer());
+			let encoded = settings;
+			if (protobuf) {
+				let message = protobuf.create(settings);
+				encoded = protobuf.encode(message);
+			}
+			this.steamUser.sendToGC(appid, header, proto, protobuf ? encoded.finish() : encoded);
 
-			if (typeof responseHeader === "undefined") {
+			if (!responseHeader) {
 				resolve();
 				return;
 			}
 
 			let sendTimeout = setTimeout(() => {
-				this.removeListener("allMsg", sendMessageResponse);
+				this.removeListener("receivedFromGC", sendMessageResponse);
 				reject(new Error("Failed to send message: Timeout"));
 			}, timeout);
 
-			this.on("allMsg", sendMessageResponse);
-			function sendMessageResponse(appid, msgType, payload) {
+			this.on("receivedFromGC", sendMessageResponse);
+			function sendMessageResponse(msgType, payload) {
 				if (msgType === responseHeader) {
 					clearTimeout(sendTimeout);
-					this.removeListener("allMsg", sendMessageResponse);
+					this.removeListener("receivedFromGC", sendMessageResponse);
 
-					if (typeof responseProtobuf === "undefined") {
+					if (!responseProtobuf) {
 						resolve(payload);
 						return;
 					}
 
 					let msg = responseProtobuf.decode(payload);
+					msg = responseProtobuf.toObject(msg, { defaults: true });
 					resolve(msg);
 				}
 			}
